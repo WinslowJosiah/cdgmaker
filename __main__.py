@@ -28,6 +28,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+ASS_REQUIREMENTS = True
+try:
+    import ass
+    from fontTools import ttLib
+
+    from datetime import timedelta
+except ImportError:
+    ASS_REQUIREMENTS = False
+
+
+MP4_REQUIREMENTS = True
+try:
+    import ffmpeg
+except ImportError:
+    MP4_REQUIREMENTS = False
+
+
 def file_relative_to(
         filepath: "StrOrBytesPath | Path",
         *relative_to: "StrOrBytesPath | Path",
@@ -82,6 +99,23 @@ def sync_to_cdg(cs: int) -> int:
         Equivalent time in CDG frames.
     """
     return cs * CDG_FPS // 100
+
+
+def cdg_to_sync(fs: int) -> int:
+    """
+    Convert CDG frame time to sync time to the nearest centisecond.
+
+    Parameters
+    ----------
+    fs : int
+        Time in CDG frames.
+
+    Returns
+    -------
+    int
+        Equivalent time in centiseconds (100ths of a second).
+    """
+    return fs * 100 // CDG_FPS
 
 
 @define
@@ -718,6 +752,9 @@ class KaraokeComposer:
         )
         logger.info("song file loaded")
 
+        self.lyric_packet_indices: set[int] = set()
+        self.instrumental_times: list[int] = []
+
         self.intro_delay = 0
         # Compose the intro
         # NOTE This also sets the intro delay for later.
@@ -809,7 +846,7 @@ class KaraokeComposer:
             self.intro_delay * 1000 // CDG_FPS,
             frame_rate=song.frame_rate,
         )
-        padded_song = intro_silence + song
+        self.audio = intro_silence + song
 
         # NOTE If video padding is not added to the end of the song, the
         # outro (or next instrumental section) begins immediately after
@@ -826,7 +863,7 @@ class KaraokeComposer:
         # - The end of the audio (with the padded intro)
         # - 8 seconds after the current video time
         end = max(
-            int(padded_song.duration_seconds * CDG_FPS),
+            int(self.audio.duration_seconds * CDG_FPS),
             self.writer.packets_queued + OUTRO_DURATION,
         )
         logger.debug(f"song should be {end} frame(s) long")
@@ -847,11 +884,11 @@ class KaraokeComposer:
         outro_silence: AudioSegment = AudioSegment.silent(
             (
                 (self.writer.packets_queued * 1000 // CDG_FPS)
-                - int(padded_song.duration_seconds * 1000)
+                - int(self.audio.duration_seconds * 1000)
             ),
             frame_rate=song.frame_rate,
         )
-        padded_song += outro_silence
+        self.audio += outro_silence
 
         # Write CDG and MP3 data to ZIP file
         outname = self.config.outname
@@ -869,7 +906,7 @@ class KaraokeComposer:
 
             mp3_bytes = BytesIO()
             logger.debug("writing mp3 data to stream")
-            padded_song.export(mp3_bytes, format="mp3")
+            self.audio.export(mp3_bytes, format="mp3")
             logger.debug(
                 f"writing stream to zipfile as {outname}.mp3"
             )
@@ -928,6 +965,10 @@ class KaraokeComposer:
                     ]
                     if self.config.border is not None:
                         page_clear_packets.append(border_preset(self.BORDER))
+                    self.lyric_packet_indices.update(range(
+                        self.writer.packets_queued,
+                        self.writer.packets_queued + len(page_clear_packets),
+                    ))
                     self.writer.queue_packets(page_clear_packets)
                     composer_state.just_cleared = True
                     # Update the current frame time
@@ -1086,6 +1127,10 @@ class KaraokeComposer:
                             assert should_erase_this_line
                         # Queue everything left in the draw queue
                         # immediately
+                        self.lyric_packet_indices.update(range(
+                            self.writer.packets_queued,
+                            self.writer.packets_queued + len(st.draw_queue),
+                        ))
                         self.writer.queue_packets(st.draw_queue)
 
                 # Purge highlight/draw queues
@@ -1157,6 +1202,13 @@ class KaraokeComposer:
         draw_groups: list[list[CDGPacket | None]] = [
             [None] * self.max_tile_height
         ] * self.config.draw_bandwidth
+
+        self.lyric_packet_indices.update(range(
+            self.writer.packets_queued,
+            self.writer.packets_queued + len(
+                list(it.chain(*highlight_groups, *draw_groups))
+            ),
+        ))
 
         # Intersperse the highlight and draw groups and queue the
         # packets
@@ -1275,6 +1327,7 @@ class KaraokeComposer:
             end: int | None,
     ):
         logger.info("composing instrumental section")
+        self.instrumental_times.append(self.writer.packets_queued)
         self.writer.queue_packets([
             *memory_preset_repeat(0),
             # TODO Add option for borders in instrumentals
@@ -1840,12 +1893,342 @@ winslowjosiah@gmail.com""",
     # !SECTION
     #endregion
 
+    #region Create MP4
+    # SECTION Create MP4
+    def create_ass(self):
+        if not ASS_REQUIREMENTS:
+            raise RuntimeError(
+                "could not import requirements for creating ASS"
+            )
+
+        # Create ASS subtitle object
+        # (ASS = Advanced Sub Station. Get your mind out of the gutter.)
+        logger.debug("creating ASS subtitle object")
+        assdoc = ass.Document()
+        assdoc.fields.update(
+            Title="",
+            WrapStyle=2,
+            ScaledBorderAndShadow="yes",
+            Collisions="normal",
+            PlayResX=CDG_SCREEN_WIDTH,
+            PlayResY=CDG_SCREEN_HEIGHT,
+        )
+
+        # Load lyric font using fontTools
+        # NOTE We do this because we need some of the font's metadata.
+        logger.debug("loading metadata from font")
+        font = ttLib.TTFont(self.font.path)
+
+        # NOTE The ASS Style lines need the "fontname as used by
+        # Windows". The best name for this purpose is name 4, which
+        # Apple calls the "full name of the font". (Oh yeah, and Apple
+        # developed TrueType, the font format used here. Who knew?)
+        fontname = font["name"].getDebugName(4)
+
+        # NOTE PIL interprets a font's size as its "nominal size", or
+        # "em height". The ASS format interprets a font's size as its
+        # "actual size" - the area enclosing its highest and lowest
+        # points.
+        # Relative values for these sizes can be found/calculated from
+        # the font's headers, and the ratio between them is used to
+        # scale the lyric font size from nominal to actual.
+        nominal_size = cast(int, font["head"].unitsPerEm)
+        ascent = cast(int, font["hhea"].ascent)
+        descent = cast(int, font["hhea"].descent)
+        actual_size = ascent - descent
+        fontsize = self.config.font_size * actual_size / nominal_size
+        # HACK If I position each line at its proper Y position, it
+        # looks shifted down slightly. This should correct it, I think.
+        y_offset = self.config.font_size * (descent / 2) / nominal_size
+
+        # Create a style for each singer
+        for i, singer in enumerate(self.config.singers, 1):
+            logger.debug(f"creating ASS style for singer {i}")
+            assdoc.styles.append(ass.Style(
+                name=f"Singer{i}",
+                fontname=fontname,
+                fontsize=fontsize,
+                primary_color=ass.line.Color(*singer.active_fill),
+                secondary_color=ass.line.Color(*singer.inactive_fill),
+                outline_color=ass.line.Color(*singer.inactive_stroke),
+                back_color=ass.line.Color(*singer.active_stroke),
+                border_style=1,  # outline + drop shadow
+                outline=self.config.stroke_width,
+                shadow=0,
+                alignment=8,  # alignment point is at top middle
+                margin_l=0,
+                margin_r=0,
+                margin_v=0,
+            ))
+
+        offset = cdg_to_sync(self.intro_delay + self.sync_offset)
+        instrumental = 0
+        # Create events for each line sung in each lyric set
+        for ci, (lyric, times) in enumerate(zip(
+            self.lyrics, self.lyric_times,
+        )):
+            for li, line in enumerate(lyric.lines):
+                # Skip line if it has no syllables
+                if not line.syllables:
+                    continue
+                logger.debug(f"creating event for lyric {ci} line {li}")
+
+                # Get intended draw time of line
+                line_draw_time = cdg_to_sync(times.line_draw[li]) + offset
+                # XXX This is hardcoded, so as to not have the line's
+                # appearance clash with the intro.
+                line_draw_time = max(line_draw_time, 800)
+
+                # The upcoming instrumental section should be the first
+                # one after this line is drawn
+                while (
+                    instrumental < len(self.instrumental_times)
+                    and (
+                        cdg_to_sync(self.instrumental_times[instrumental])
+                        <= line_draw_time
+                    )
+                ):
+                    instrumental += 1
+
+                # Get intended erase time of line, if possible
+                if times.line_erase:
+                    line_erase_time = (
+                        cdg_to_sync(times.line_erase[li]) + offset
+                    )
+                # If there are no erase times saved, then lyrics are
+                # being cleared by page instead of being erased
+                else:
+                    # Get first non-empty line of next page
+                    next_page_li = (
+                        li // lyric.lines_per_page + 1
+                    ) * lyric.lines_per_page
+                    while next_page_li < len(lyric.lines):
+                        if lyric.lines[next_page_li].syllables:
+                            break
+                        next_page_li += 1
+
+                    # If there is a next page
+                    if next_page_li < len(lyric.lines):
+                        # Erase the current line when the next page is
+                        # drawn
+                        line_erase_time = (
+                            cdg_to_sync(times.line_draw[next_page_li]) + offset
+                        )
+                    # If there is no next page
+                    else:
+                        # Erase the current line after the last syllable
+                        # of this line is highlighted
+                        # XXX This is hardcoded.
+                        line_erase_time = (
+                            cdg_to_sync(line.syllables[-1].end_offset) + offset
+                            + 200
+                        )
+
+                    if instrumental < len(self.instrumental_times):
+                        # The current line should be erased before the
+                        # upcoming instrumental section
+                        line_erase_time = min(
+                            line_erase_time,
+                            cdg_to_sync(self.instrumental_times[instrumental]),
+                        )
+
+                text = ""
+                # Text is horizontally centered, and at the line's Y
+                x = CDG_SCREEN_WIDTH // 2
+                y = line.y + y_offset
+                text += f"{{\\pos({x},{y})}}"
+                # Text should fade in and out with the intended
+                # draw/erase timing
+                # NOTE This is in milliseconds for some reason, whereas
+                # every other timing value is in centiseconds.
+                fade = cdg_to_sync(self.LINE_DRAW_ERASE_GAP) * 10
+                text += f"{{\\fad({fade},{fade})}}"
+                # There should be a pause before the text is highlighted
+                line_start_offset = (
+                    cdg_to_sync(line.syllables[0].start_offset) + offset
+                )
+                text += f"{{\\k{line_start_offset - line_draw_time}}}"
+                # Each syllable should be filled in for the specified
+                # duration
+                for syll in line.syllables:
+                    length = cdg_to_sync(syll.end_offset - syll.start_offset)
+                    text += f"{{\\kf{length}}}{syll.text}"
+
+                # Create a dialogue event for this line
+                assdoc.events.append(ass.Dialogue(
+                    layer=ci,
+                    # NOTE The line draw and erase times are in
+                    # centiseconds, so we need to multiply by 10 for
+                    # milliseconds.
+                    start=timedelta(milliseconds=line_draw_time * 10),
+                    end=timedelta(milliseconds=line_erase_time * 10),
+                    style=f"Singer{line.singer}",
+                    effect="karaoke",
+                    text=text,
+                ))
+
+        outname = self.config.outname
+        assfile_name = self.relative_dir / Path(f"{outname}.ass")
+        logger.debug(f"dumping ASS object to {assfile_name}")
+        # HACK If I don't specify "utf-8-sig" as the encoding, the
+        # python-ass module gives me a warning telling me to. This adds
+        # a "byte order mark" to the ASS file (seemingly unnecessarily).
+        with open(assfile_name, "w", encoding="utf-8-sig") as assfile:
+            assdoc.dump_file(assfile)
+        logger.info(f"ASS object dumped to {assfile_name}")
+
+    def create_mp4(self, height: int = 720, fps: int = 30):
+        if not MP4_REQUIREMENTS:
+            raise RuntimeError(
+                "could not import requirements for creating MP4"
+            )
+
+        outname = self.config.outname
+
+        # Create a "background plate" for the video
+        # NOTE The "background plate" will simply be the CDG file we've
+        # composed, but without the lyrics. We create this by replacing
+        # all lyric-drawing packets with no-instruction packets.
+        platecdg_name = self.relative_dir / Path(f"{outname}.plate.cdg")
+        logger.debug(f"writing plate CDG to {platecdg_name}")
+        with open(platecdg_name, "wb") as platecdg:
+            logger.debug("writing plate")
+            for i, packet in enumerate(self.writer.packets):
+                packet_to_write = packet
+                if i in self.lyric_packet_indices:
+                    packet_to_write = no_instruction()
+                self.writer.write_packet(platecdg, packet_to_write)
+        logger.info(f"plate CDG written to {platecdg_name}")
+
+        # Create an MP3 file for the audio
+        platemp3_name = self.relative_dir / Path(f"{outname}.plate.mp3")
+        logger.debug(f"writing plate MP3 to {platemp3_name}")
+        self.audio.export(platemp3_name, format="mp3")
+        logger.info(f"plate MP3 written to {platemp3_name}")
+
+        # Create a subtitle file for the HQ lyrics
+        self.create_ass()
+        assfile_name = self.relative_dir / Path(f"{outname}.ass")
+
+        logger.debug("building ffmpeg command for encoding MP4")
+        video = (
+            ffmpeg.input(platecdg_name).video
+            # Pad the end of the video by a few seconds
+            # HACK This ensures the last video frame isn't some CDG
+            # frame before the last one. This padding will also be cut
+            # later.
+            .filter_("tpad", stop_mode="clone", stop_duration=5)
+            # Set framerate
+            .filter_("fps", fps=fps)
+            # Scale video to resolution
+            .filter_(
+                "scale",
+                # HACK The libx264 codec requires the video dimensions
+                # to be divisible by 2. Here, the width is not only
+                # automatically calculated from the plate's aspect
+                # ratio, but truncated down to a multiple of 2.
+                w="trunc(oh*a/2)*2",
+                h=height // 2 * 2,
+                flags="neighbor",
+            )
+            # Burn in subtitles
+            .filter_("ass", filename=assfile_name)
+        )
+        audio = ffmpeg.input(platemp3_name)
+
+        mp4_name = self.relative_dir / Path(f"{outname}.mp4")
+        mp4 = ffmpeg.output(
+            video, audio,
+            filename=mp4_name,
+            hide_banner=None,
+            loglevel="error",
+            stats=None,
+            # Video should use the H.264 codec, at a decent quality
+            vcodec="libx264",
+            pix_fmt="yuv420p",
+            crf=22,
+            preset="veryfast",
+            # Truncate to the length of the shortest input
+            # HACK This effectively removes the video padding that was
+            # added earlier, because the audio is shorter than the
+            # padded video.
+            shortest=None,
+        ).overwrite_output()
+        logger.debug(f"ffmpeg command: {mp4.compile()}")
+        mp4.run()
+
+        logger.debug("deleting plate CDG")
+        platecdg_name.unlink()
+        logger.info("plate CDG deleted")
+
+        logger.debug("deleting plate MP3")
+        platemp3_name.unlink()
+        logger.info("plate MP3 deleted")
+
+    # !SECTION
+    #endregion
+
 
 if __name__ == "__main__":
+    from argparse import ArgumentParser, RawDescriptionHelpFormatter
     import sys
 
-    # TODO Make the logging level configurable from the command line
-    logging.basicConfig(level=logging.DEBUG)
+    parser = ArgumentParser(
+        prog="py -m cdgmaker",
+        description="Create custom CDG files for karaoke.",
+        epilog=(
+            "For a description of the config format, visit "
+            "https://github.com/WinslowJosiah/cdgmaker"
+        ),
+        formatter_class=RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "config", help=".toml config file to create CDG files with",
+        metavar="FILE",
+        type=str,
+    )
+    parser.add_argument(
+        "-v", "--verbose", help="make logs more verbose (-v, -vv, etc.)",
+        action="count",
+        default=0,
+    )
+    parser.add_argument(
+        "-r", "--render", help="render MP4 video of created CDG file",
+        action="store_true",
+    )
 
-    kc = KaraokeComposer.from_file(sys.argv[1])
+    # If there aren't any arguments to parse
+    if len(sys.argv) < 2:
+        # Print help message and exit with error
+        parser.print_help()
+        sys.exit(1)
+
+    # Overwrite the error handler to also print a help message
+    # HACK: This is what's known in the biz as a "monkey-patch". Don't
+    # worry if it doesn't make sense to you; it makes sense to argparse,
+    # and that's all that matters.
+    def custom_error_handler(_self: ArgumentParser):
+        def wrapper(message: str):
+            sys.stderr.write(f"{_self.prog}: error: {message}\n")
+            _self.print_help()
+            sys.exit(2)
+        return wrapper
+    parser.error = custom_error_handler(parser)
+
+    # Parse command line arguments
+    args = parser.parse_args()
+
+    # Set logging level based on verbosity
+    log_level = logging.ERROR
+    if not args.verbose:
+        log_level = logging.WARNING
+    elif args.verbose == 1:
+        log_level = logging.INFO
+    elif args.verbose >= 2:
+        log_level = logging.DEBUG
+    logging.basicConfig(level=log_level)
+
+    kc = KaraokeComposer.from_file(args.config)
     kc.compose()
+    if args.render:
+        kc.create_mp4(height=1080, fps=60)
