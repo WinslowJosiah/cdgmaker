@@ -1068,34 +1068,48 @@ class KaraokeComposer:
                 )
                 last_syllable = next(syllable_iter)
                 # Find first syllable on or after the instrumental time
-                while last_syllable.start_offset < instrumental_time:
-                    last_syllable = next(syllable_iter)
-                first_syllable = lyric.lines[
-                    last_syllable.line_index
-                ].syllables[0]
-                # If this line is being actively sung
-                if current_time >= first_syllable.start_offset:
-                    # If this is the last syllable in this line
-                    if last_syllable.syllable_index == len(
-                        lyric.lines[last_syllable.line_index].syllables
-                    ) - 1:
-                        instrumental_time = 0
-                        if times.line_erase:
-                            # Wait for this line to be erased
-                            instrumental_time = times.line_erase[
-                                last_syllable.line_index
-                            ]
-                        if not instrumental_time:
-                            # Add 1.5 seconds
-                            # XXX This is hardcoded.
-                            instrumental_time = last_syllable.end_offset + 450
-                    else:
-                        logger.debug(
-                            "forcing next instrumental not to wait; it "
-                            "does not occur at or before the end of this "
-                            "line"
-                        )
-                        instrumental.wait = False
+                while (
+                    last_syllable is not None
+                    and last_syllable.start_offset < instrumental_time
+                ):
+                    last_syllable = next(syllable_iter, None)
+                # If syllable was not found
+                if last_syllable is None:
+                    # Make sure the instrumental won't play
+                    # FIXME This happens when the instrumental is
+                    # happening after some syllable in another lyric.
+                    # What's a better way to handle this?
+                    instrumental_time = float("inf")
+                # If syllable was found
+                else:
+                    first_syllable = lyric.lines[
+                        last_syllable.line_index
+                    ].syllables[0]
+                    # If this line is being actively sung
+                    if current_time >= first_syllable.start_offset:
+                        # If this is the last syllable in this line
+                        if last_syllable.syllable_index == len(
+                            lyric.lines[last_syllable.line_index].syllables
+                        ) - 1:
+                            instrumental_time = 0
+                            if times.line_erase:
+                                # Wait for this line to be erased
+                                instrumental_time = times.line_erase[
+                                    last_syllable.line_index
+                                ]
+                            if not instrumental_time:
+                                # Add 1.5 seconds
+                                # XXX This is hardcoded.
+                                instrumental_time = (
+                                    last_syllable.end_offset + 450
+                                )
+                        else:
+                            logger.debug(
+                                "forcing next instrumental not to "
+                                "wait; it does not occur at or before "
+                                "the end of this line"
+                            )
+                            instrumental.wait = False
             should_instrumental = current_time >= instrumental_time
         # If there should be an instrumental section now
         if should_instrumental:
@@ -1538,6 +1552,7 @@ class KaraokeComposer:
                 for coord_packets in packets.values():
                     self.writer.queue_packets(coord_packets)
             else:
+                # TODO Add option for custom transitions
                 transition = Image.open(
                     impresources.files(transitions)
                     / f"{instrumental.transition}.png"
