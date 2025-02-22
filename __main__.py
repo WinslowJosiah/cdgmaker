@@ -377,6 +377,9 @@ class KaraokeComposer:
 
         self._set_draw_times()
 
+        # Sort instrumentals by sync time, just in case
+        self.config.instrumentals.sort(key=lambda inst: inst.sync)
+
     @classmethod
     def from_file(
             cls,
