@@ -1240,6 +1240,34 @@ class KaraokeComposer:
         if current_time < first_syllable.start_offset:
             return instrumental_time
 
+        last_syllable_page = last_syllable.line_index // lyric.lines_per_page
+        syllable_after_last = next(syllable_iter, None)
+        syllable_is_last_in_page = syllable_after_last is None or (
+            syllable_after_last.line_index // lyric.lines_per_page
+            > last_syllable_page
+        )
+        # If this syllable is not the last one in this page
+        if not syllable_is_last_in_page:
+            # Warn the user
+            logger.warning(
+                "instrumentals should not be triggered in the middle "
+                "of a page, to avoid unwanted side effects\n"
+                + "\n".join(
+                    "\t" + "".join(
+                        f"{{{syll.text}}}"
+                        if (
+                            syll.syllable_index == last_syllable.syllable_index
+                            and syll.line_index == last_syllable.line_index
+                        )
+                        else syll.text
+                        for syll in lyric.lines[
+                            last_syllable_page * lyric.lines_per_page + li
+                        ].syllables
+                    )
+                    for li in range(lyric.lines_per_page)
+                )
+            )
+
         # If this line is being actively sung, and this is the last
         # syllable in this line
         if last_syllable.syllable_index == len(
