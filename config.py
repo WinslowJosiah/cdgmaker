@@ -72,6 +72,9 @@ class SettingsInstrumental:
     transition: str | None = None
     x: int = 0
     y: int = 0
+    # HACK This property exists to ensure that only one warning is
+    # logged for starting an instrumental in the middle of a page.
+    _warned: bool = False
 
 
 @define

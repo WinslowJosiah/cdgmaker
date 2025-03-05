@@ -1247,7 +1247,7 @@ class KaraokeComposer:
             > last_syllable_page
         )
         # If this syllable is not the last one in this page
-        if not syllable_is_last_in_page:
+        if not instrumental._warned and not syllable_is_last_in_page:
             # Warn the user
             logger.warning(
                 "instrumentals should not be triggered in the middle "
@@ -1267,6 +1267,7 @@ class KaraokeComposer:
                     for li in range(lyric.lines_per_page)
                 )
             )
+            instrumental._warned = True
 
         # If this line is being actively sung, and this is the last
         # syllable in this line
