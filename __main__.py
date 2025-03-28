@@ -6,7 +6,7 @@ import operator
 from pathlib import Path
 import re
 import tomllib
-from typing import NamedTuple, Self, TYPE_CHECKING, cast
+from typing import Callable, NamedTuple, Self, TYPE_CHECKING, cast
 from zipfile import ZipFile
 if TYPE_CHECKING:
     from _typeshed import FileDescriptorOrPath, StrOrBytesPath
@@ -1996,7 +1996,45 @@ winslowjosiah@gmail.com""",
         ascent = cast(int, font["hhea"].ascent)
         descent = cast(int, font["hhea"].descent)
         actual_size = ascent - descent
+        logger.info(
+            f"actual/nominal font size ratio = {actual_size} / "
+            f"{nominal_size}"
+        )
         fontsize = self.config.font_size * actual_size / nominal_size
+        logger.info(f"calculated ASS font size = {fontsize}")
+
+        # XXX Sometimes, the scaling we do is too much for the lines to
+        # fit. What I want to do here is find the maximum font size that
+        # allows every line to fit within the video width, but in all
+        # honesty, I have no idea how. I'm just sorta eyeballing it.
+        # FIXME All I want is for the ASS text to be the same size as
+        # the CDG text. How the hell would I do this properly? I don't
+        # want to have to keep doing workarounds.
+        cmap = font.getBestCmap()
+        hmtx = font["hmtx"]
+        get_adv_width: Callable[[str], int] = lambda c: hmtx[cmap[ord(c)]][0]
+        # Calculate the width of each line
+        line_widths: list[int] = []
+        for lyric in self.lyrics:
+            for line in lyric.lines:
+                text = "".join(syll.text for syll in line.syllables)
+                # Sum the advance widths for each character in the line
+                # to get the line's width
+                # REVIEW Is this exact? I don't know what happens if you
+                # take kerning into account.
+                line_width = sum(map(get_adv_width, text))
+                line_widths.append(line_width)
+        # Find the maximum font size that allows every line to fit
+        max_line_width = max(line_widths)
+        # XXX I have no idea why I'm scaling the screen width by this
+        # factor, but it seems to work.
+        screen_width = CDG_SCREEN_WIDTH * 1.14
+        max_fontsize = screen_width * nominal_size / max_line_width
+        logger.info(f"max allowed ASS fontsize ~ {max_fontsize}")
+        if fontsize > max_fontsize:
+            fontsize = max_fontsize
+            logger.info("calculated ASS font size too big; clamping")
+
         # HACK If I position each line at its proper Y position, it
         # looks shifted down slightly. This should correct it, I think.
         y_offset = self.config.font_size * (descent / 2) / nominal_size
