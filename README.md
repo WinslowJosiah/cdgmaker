@@ -28,6 +28,15 @@ and (my personal favorite) [Karaoke Builder Player](https://www.karaokebuilder.c
 
 You can find some example songs for it [here](https://winslowjosiah.com/blog/2024/09/29/i-made-a-cdg-karaoke-maker/examples.zip).
 
+If you specify the `-r` flag, a `.mp4` file and `.ass` subtitle file will also
+be created (note: requires FFmpeg).
+
+```bash
+py -m cdgmaker song.toml -r
+```
+
+----
+
 Note that the files will have an 8-second intro and outro, the style of which is
 hardcoded and unchangeable at the moment. I'm still brainstorming ways to make
 the format of the intro screen easily configurable.
