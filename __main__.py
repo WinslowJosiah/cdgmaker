@@ -6,7 +6,7 @@ import operator
 from pathlib import Path
 import re
 import tomllib
-from typing import Callable, NamedTuple, Self, TYPE_CHECKING, cast
+from typing import NamedTuple, Self, TYPE_CHECKING, cast
 from zipfile import ZipFile
 if TYPE_CHECKING:
     from _typeshed import FileDescriptorOrPath, StrOrBytesPath
@@ -2176,6 +2176,12 @@ winslowjosiah@gmail.com""",
         self.create_ass()
         assfile_name = self.relative_dir / Path(f"{outname}.ass")
 
+        font_path = self.config.font
+        try:
+            font_path = file_relative_to(font_path, self.relative_dir)
+        except:
+            pass
+
         logger.debug("building ffmpeg command for encoding MP4")
         video = (
             ffmpeg.input(platecdg_name).video
@@ -2198,7 +2204,11 @@ winslowjosiah@gmail.com""",
                 flags="neighbor",
             )
             # Burn in subtitles
-            .filter_("ass", filename=assfile_name)
+            .filter_(
+                "subtitles",
+                filename=assfile_name,
+                fontsdir=font_path.parent,
+            )
         )
         audio = ffmpeg.input(platemp3_name)
 
