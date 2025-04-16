@@ -359,9 +359,18 @@ class KaraokeComposer:
             for lyric in self.lyrics
             for line in lyric.lines
         )
-        line_offset = (
-            self.max_tile_height * CDG_TILE_HEIGHT - max_height
-        ) // 2
+        logger.debug(
+            f"line images rendered at {max_height} pixel(s) height"
+        )
+        max_height_quantized = self.max_tile_height * CDG_TILE_HEIGHT
+        expected_max_height = lyric.line_tile_height * CDG_TILE_HEIGHT
+        if max_height > expected_max_height:
+            logger.warning(
+                "lines too high\n"
+                f"max height is {expected_max_height} pixel(s); "
+                f"actual height is {max_height} pixel(s)"
+            )
+        line_offset = (max_height_quantized - max_height) // 2
         logger.debug(
             f"lines will be vertically offset by {line_offset} pixel(s)"
         )
