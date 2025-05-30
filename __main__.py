@@ -702,7 +702,10 @@ class KaraokeComposer:
                     erase_time += self.LINE_DRAW_ERASE_GAP
 
             draw_time = max(draw_time, erase_time)
-            start_line = last_page * lyric.lines_per_page
+            # NOTE We're going forward not from the "last page", but
+            # specifically the page before this one. This properly draws
+            # this page in the case of skipped (empty) pages.
+            start_line = (this_page - 1) * lyric.lines_per_page
             # Set draw times for lines on this page
             for i in range(start_line, start_line + lyric.lines_per_page):
                 j = i + lyric.lines_per_page
