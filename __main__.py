@@ -9,14 +9,14 @@ import tomllib
 from typing import NamedTuple, Self, TYPE_CHECKING, cast
 from zipfile import ZipFile
 if TYPE_CHECKING:
-    from _typeshed import FileDescriptorOrPath, StrOrBytesPath
+    from _typeshed import StrPath
 
 from attrs import define
 from cattrs import Converter
 from PIL import Image, ImageFont
 from pydub import AudioSegment
 
-from . import fonts, images, transitions
+from . import fonts, images, transitions  # type: ignore
 from .cdg import *
 from .config import *
 from .pack import *
@@ -46,8 +46,8 @@ except ImportError:
 
 
 def file_relative_to(
-        filepath: "StrOrBytesPath | Path",
-        *relative_to: "StrOrBytesPath | Path",
+        filepath: "StrPath | Path",
+        *relative_to: "StrPath | Path",
 ) -> Path:
     """
     Convert possibly relative filepath to absolute path, relative to any
@@ -184,7 +184,7 @@ class KaraokeComposer:
     def __init__(
             self,
             config: Settings,
-            relative_dir: "StrOrBytesPath | Path" = "",
+            relative_dir: "StrPath | Path" = "",
     ):
         self.config = config
         self.relative_dir = Path(relative_dir)
@@ -240,9 +240,9 @@ class KaraokeComposer:
                 textline = textline.strip()
                 # Tildes signify empty lines
                 if textline == "~":
-                    syllables = []
+                    syllables_in_line = []
                 else:
-                    syllables = [
+                    syllables_in_line = [
                         # Replace underscores in syllables with spaces
                         syllable.replace("_", " ")
                         for syllable in it.chain.from_iterable(
@@ -254,8 +254,8 @@ class KaraokeComposer:
                         )
                     ]
 
-                logger.debug(f"singer {singer}: {syllables}")
-                lines.append(syllables)
+                logger.debug(f"singer {singer}: {syllables_in_line}")
+                lines.append(syllables_in_line)
                 line_singers.append(singer)
 
             logger.debug(f"rendering line images and masks for lyric {ci}")
@@ -392,7 +392,7 @@ class KaraokeComposer:
     @classmethod
     def from_file(
             cls,
-            file: "FileDescriptorOrPath",
+            file: "StrPath",
     ) -> Self:
         converter = Converter(prefer_attrib_converters=True)
         relative_dir = Path(file).parent
@@ -406,7 +406,7 @@ class KaraokeComposer:
     def from_string(
             cls,
             config: str,
-            relative_dir: "StrOrBytesPath | Path" = "",
+            relative_dir: "StrPath | Path" = "",
     ) -> Self:
         converter = Converter(prefer_attrib_converters=True)
         return cls(
@@ -961,6 +961,7 @@ class KaraokeComposer:
             self.config.clear_mode == LyricClearMode.PAGE
             and should_draw_this_line
         ):
+            assert line_draw_info is not None
             composer_state.last_page = composer_state.this_page
             composer_state.this_page = (
                 line_draw_info.line_index // lyric.lines_per_page
@@ -1245,7 +1246,7 @@ class KaraokeComposer:
             # FIXME This happens when the instrumental is happening
             # after some syllable in another lyric. What's a better way
             # to handle this?
-            return float("inf")
+            return float("inf")  # pyright: ignore[reportReturnType]
 
         first_syllable = lyric.lines[last_syllable.line_index].syllables[0]
         # If this line is not being actively sung, stop here
@@ -1532,9 +1533,14 @@ class KaraokeComposer:
                     instrumental.stroke or self.UNUSED_COLOR,
                 ],
             )
+            background_image_palette = background_image.getpalette()
+            assert background_image_palette is not None
 
             # Queue palette packets
-            palette = list(it.batched(background_image.getpalette(), 3))
+            palette = cast(
+                list[RGBColor],
+                list(it.batched(background_image_palette, 3)),
+            )
             if len(palette) < 8:
                 self.writer.queue_packet(load_color_table_lo(
                     list(pad(palette, 8, padvalue=self.UNUSED_COLOR))
@@ -1576,7 +1582,7 @@ class KaraokeComposer:
                 ),
                 0,
             )
-            aligned_background_image.putpalette(background_image.getpalette())
+            aligned_background_image.putpalette(background_image_palette)
             # Paste background image onto axis-aligned image
             aligned_background_image.paste(background_image, (padleft, padtop))
             # Paste existing screen text onto axis-aligned image
@@ -1612,7 +1618,7 @@ class KaraokeComposer:
                 # TODO Add option for custom transitions
                 transition = Image.open(
                     impresources.files(transitions)
-                    / f"{instrumental.transition}.png"
+                    / f"{instrumental.transition}.png"  # type: ignore
                 )
                 for coord in self._gradient_to_tile_positions(transition):
                     self.writer.queue_packets(packets.get(coord, []))
@@ -1642,16 +1648,18 @@ class KaraokeComposer:
         logger.debug("loading intro background image")
         # Load background image
         background_image = self._load_image(
-            impresources.files(images) / "intro.png",
+            impresources.files(images) / "intro.png",  # type: ignore
             [
                 (55, 154, 73),  # background
                 (55, 154, 73),  # border
                 (32, 32, 34),   # text
             ],
         )
+        background_image_palette = background_image.getpalette()
+        assert background_image_palette is not None
 
         smallfont = ImageFont.truetype(
-            impresources.files(fonts) / "DMSans-VariableFont_opsz,wght.ttf",
+            impresources.files(fonts) / "DMSans-VariableFont_opsz,wght.ttf",  # type: ignore
             16,
         )
         bigfont_size = 32
@@ -1662,7 +1670,7 @@ class KaraokeComposer:
             text_image = Image.new("P", (CDG_VISIBLE_WIDTH, MAX_HEIGHT * 2), 0)
             y = 0
             bigfont = ImageFont.truetype(
-                impresources.files(fonts) / "DMSerifDisplay-Regular.ttf",
+                impresources.files(fonts) / "DMSerifDisplay-Regular.ttf",  # type: ignore
                 bigfont_size,
             )
 
@@ -1718,7 +1726,10 @@ class KaraokeComposer:
         )
 
         # Queue palette packets
-        palette = list(it.batched(background_image.getpalette(), 3))
+        palette = cast(
+            list[RGBColor],
+            list(it.batched(background_image_palette, 3)),
+        )
         if len(palette) < 8:
             self.writer.queue_packet(load_color_table_lo(
                 list(pad(palette, 8, padvalue=self.UNUSED_COLOR))
@@ -1737,7 +1748,7 @@ class KaraokeComposer:
 
         # Queue background image packets (and apply transition)
         transition = Image.open(
-            impresources.files(transitions) / "circlein.png"
+            impresources.files(transitions) / "circlein.png"  # type: ignore
         )
         for coord in self._gradient_to_tile_positions(transition):
             self.writer.queue_packets(packets.get(coord, []))
@@ -1774,16 +1785,18 @@ class KaraokeComposer:
         logger.debug("loading outro background image")
         # Load background image
         background_image = self._load_image(
-            impresources.files(images) / "intro.png",
+            impresources.files(images) / "intro.png",  # type: ignore
             [
                 (55, 154, 73),  # background
                 (55, 154, 73),  # border
                 (32, 32, 34),   # text
             ],
         )
+        background_image_palette = background_image.getpalette()
+        assert background_image_palette is not None
 
         smallfont = ImageFont.truetype(
-            impresources.files(fonts) / "DMSans-VariableFont_opsz,wght.ttf",
+            impresources.files(fonts) / "DMSans-VariableFont_opsz,wght.ttf",  # type: ignore
             18,
         )
         MAX_HEIGHT = 118
@@ -1825,7 +1838,10 @@ winslowjosiah@gmail.com""",
         )
 
         # Queue palette packets
-        palette = list(it.batched(background_image.getpalette(), 3))
+        palette = cast(
+            list[RGBColor],
+            list(it.batched(background_image_palette, 3)),
+        )
         if len(palette) < 8:
             self.writer.queue_packet(load_color_table_lo(
                 list(pad(palette, 8, padvalue=self.UNUSED_COLOR))
@@ -1844,7 +1860,7 @@ winslowjosiah@gmail.com""",
 
         # Queue background image packets (and apply transition)
         transition = Image.open(
-            impresources.files(transitions) / "circlein.png"
+            impresources.files(transitions) / "circlein.png"  # type: ignore
         )
         for coord in self._gradient_to_tile_positions(transition):
             self.writer.queue_packets(packets.get(coord, []))
@@ -1855,7 +1871,7 @@ winslowjosiah@gmail.com""",
 
     def _load_image(
             self,
-            image_path: "StrOrBytesPath | Path",
+            image_path: "StrPath | Path",
             partial_palette: list[RGBColor] | None = None,
     ):
         if partial_palette is None:
@@ -1887,7 +1903,7 @@ winslowjosiah@gmail.com""",
             # 0x33, etc. This means that we can simply round each value
             # to the nearest multiple of 0x11 (17 in decimal).
             0x11 * round(v / 0x11)
-            for v in image.getpalette()
+            for v in cast(list[int], image.getpalette())
         ])
         image = image.quantize()
         logger.debug(f"image uses {max(image.getdata()) + 1} color(s)")
@@ -1900,11 +1916,14 @@ winslowjosiah@gmail.com""",
             image.putdata(image.getdata(), offset=len(partial_palette))
             # Place other colors in palette
             image.putpalette(
-                list(it.chain(*partial_palette)) + image.getpalette()
+                list(it.chain(*partial_palette))
+                + cast(list[int], image.getpalette())
             )
 
         logger.debug(
-            f"palette: {list(it.batched(image.getpalette(), 3))!r}"
+            f"palette: {
+                list(it.batched(cast(list[int], image.getpalette()), 3))
+            !r}"
         )
 
         logger.debug("masking out non-transparent parts of image")
@@ -1954,14 +1973,17 @@ winslowjosiah@gmail.com""",
             # is not done with reverse=True to preserve the sort's
             # stability.
             intensities[(tile_y, tile_x)] = -sum(
-                image.getpixel((
-                    tile_x * CDG_TILE_WIDTH + x,
-                    tile_y * CDG_TILE_HEIGHT + y,
-                ))
+                cast(
+                    int,
+                    image.getpixel((
+                        tile_x * CDG_TILE_WIDTH + x,
+                        tile_y * CDG_TILE_HEIGHT + y,
+                    )),
+                )
                 for x in range(CDG_TILE_WIDTH)
                 for y in range(CDG_TILE_HEIGHT)
             )
-        return sorted(intensities, key=intensities.get)
+        return sorted(intensities, key=intensities.__getitem__)
     # !SECTION
     #endregion
 
@@ -1995,7 +2017,7 @@ winslowjosiah@gmail.com""",
         # Windows". The best name for this purpose is name 4, which
         # Apple calls the "full name of the font". (Oh yeah, and Apple
         # developed TrueType, the font format used here. Who knew?)
-        fontname = font["name"].getDebugName(4)
+        fontname = font["name"].getDebugName(4)  # type: ignore
 
         # NOTE PIL interprets a font's size as its "nominal size", or
         # "em height". The ASS format interprets a font's size as its
@@ -2004,9 +2026,9 @@ winslowjosiah@gmail.com""",
         # Relative values for these sizes can be found/calculated from
         # the font's headers, and the ratio between them is used to
         # scale the lyric font size from nominal to actual.
-        nominal_size = cast(int, font["head"].unitsPerEm)
-        ascent = cast(int, font["hhea"].ascent)
-        descent = cast(int, font["hhea"].descent)
+        nominal_size = cast(int, font["head"].unitsPerEm)  # type: ignore
+        ascent = cast(int, font["hhea"].ascent)  # type: ignore
+        descent = cast(int, font["hhea"].descent)  # type: ignore
         actual_size = ascent - descent
         logger.info(
             f"actual/nominal font size ratio = {actual_size} / "
