@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import tomllib
 from typing import NamedTuple, Self, TYPE_CHECKING, cast
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 if TYPE_CHECKING:
     from _typeshed import StrPath
 
@@ -909,7 +909,7 @@ class KaraokeComposer:
         outname = self.config.outname
         zipfile_name = self.relative_dir / Path(f"{outname}.zip")
         logger.debug(f"creating {zipfile_name}")
-        with ZipFile(zipfile_name, "w") as zipfile:
+        with ZipFile(zipfile_name, "w", compression=ZIP_DEFLATED) as zipfile:
             cdg_bytes = BytesIO()
             logger.debug("writing cdg packets to stream")
             self.writer.write_packets(cdg_bytes)
